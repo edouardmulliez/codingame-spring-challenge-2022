@@ -1,6 +1,7 @@
 from __future__ import annotations
 import sys
 import math
+import random
 from typing import NamedTuple
 
 
@@ -85,6 +86,19 @@ def get_defense_waiting_positions(nb_positions: int, radius: float = BASE_RADIUS
     return positions
 
 
+def get_random_position_in_enemy_base_radius():
+    angles = [math.pi / 2 / 8, math.pi / 4, 7 * math.pi / 2 / 8]
+    # angle = random.uniform(0, math.pi / 2)
+    angle = random.choice(angles)
+    p = Position(
+            int(BASE_RADIUS * math.cos(angle)),
+            int(BASE_RADIUS * math.sin(angle)))
+    if base_position.x == 0:
+        p = invert_position(p)
+    
+    return p
+
+
 def find_targets(monsters: list[Entity]):
     
     def get_threat_level(monster: Entity) -> float:
@@ -165,13 +179,22 @@ def get_commands(
         distance_to_hero = get_distance(monster.position, hero.position)
         distance_to_base = get_distance(monster.position, base_position)
 
-        return (
-            my_mana > MANA_PER_SPELL
-            and monster.shield_life == 0  # monster not protected by a shield
-            and distance_to_base < BASE_RADIUS / 3  # very close to base
-            and distance_to_hero < SPELL_WIND_RADIUS)
+        # False if it's not possible cast the spell
+        if (monster.shield_life > 0 
+            or distance_to_hero >= SPELL_WIND_RADIUS
+            or my_mana < MANA_PER_SPELL):
+            return False
+
+        if (my_mana > 10 * MANA_PER_SPELL):
+            # we have tons of mana, let's use it!
+            return distance_to_base < BASE_RADIUS  # inside base radius
+        else:
+            return distance_to_base < BASE_RADIUS / 3  # very close to base
+
     
     def should_use_control_spell(monster: Entity, hero: Entity, my_mana: int):
+        # disabling control spell
+        return False
         distance_to_hero = get_distance(monster.position, hero.position)
         distance_to_base = get_distance(monster.position, base_position)
         distance_to_enemy_base = get_distance(monster.position, enemy_base_position)
@@ -190,7 +213,8 @@ def get_commands(
         return f'SPELL WIND {enemy_base_position.x} {enemy_base_position.y} {comment}'
     
     def spell_control_command(monster: Entity):
-        return f'SPELL CONTROL {monster.id} {enemy_base_position.x} {enemy_base_position.y}'
+        p = get_random_position_in_enemy_base_radius()
+        return f'SPELL CONTROL {monster.id} {p.x} {p.y}'
 
     for (i, hero) in enumerate(heroes):
         if hero.id in hero_to_monster:
