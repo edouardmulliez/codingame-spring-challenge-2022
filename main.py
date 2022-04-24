@@ -1,5 +1,5 @@
 from __future__ import annotations
-from email.mime import base
+from enum import Enum
 import sys
 import math
 import random
@@ -222,7 +222,7 @@ class Defense:
             or my_mana < MANA_PER_SPELL):
             return False
 
-        if (my_mana > 10 * MANA_PER_SPELL):
+        if (my_mana > 3 * MANA_PER_SPELL):
             # we have tons of mana, let's use it!
             return distance_to_base < BASE_RADIUS  # inside base radius
         else:
@@ -378,7 +378,7 @@ class Attacking:
             d_hero_monster = get_distance(hero.position, monster.position)
             d_monster_enemy_base = get_distance(monster.position, enemy_base_position)
 
-            if (my_mana <= 5 * MANA_PER_SPELL  # We want to keep mana for defense in case it's needed
+            if (my_mana <= 3 * MANA_PER_SPELL  # We want to keep mana for defense in case it's needed
                 or monster.shield_life > 0  # can't SHIELD a monster with SHIELD
                 or monster.threat_for != THREAT_FOR_OP):  # we only want to SHIELD monsters attacking opponent base
                 continue
@@ -386,7 +386,7 @@ class Attacking:
                 continue
 
             # TODO: reevaluate this condition + score
-            if d_monster_enemy_base < 1.2 * BASE_RADIUS:
+            if d_monster_enemy_base < 1.1 * BASE_RADIUS:
                 score = 1000 + 10 * bound_to_zero_one(monster.health)
                 action = spell_shield_command(monster)
                 actions.append((action, monster, score))
@@ -407,7 +407,7 @@ class Attacking:
             d_hero_monster = get_distance(hero.position, monster.position)
             d_monster_enemy_base = get_distance(monster.position, enemy_base_position)
 
-            if (my_mana <= 5 * MANA_PER_SPELL  # We want to keep mana for defense in case it's needed
+            if (my_mana <= 3 * MANA_PER_SPELL  # We want to keep mana for defense in case it's needed
                 or monster.shield_life > 0  # We can't CONTROL a monster with SHIELD
                 or monster.threat_for == THREAT_FOR_OP):  # we only want to CONTROL monsters not attacking opponent base
                 continue
@@ -468,7 +468,69 @@ class Attacking:
         # - if I could CONTROL one
 
 
-farming = Farming()
+class Strategy(Enum):
+    FARMING = 1
+    ATTACKING = 2
+
+
+class Orchestrator:
+    """
+    Decides which type of strategy (defense/farming/attack) should be applied during the game
+    """
+    # TODO: adapt this number
+    MANA_THRESHOLD_FOR_ATTACK = 20 * MANA_PER_SPELL
+    # TODO: adapt this number
+    MANA_THRESHOLD_FOR_FARMING = 3 * MANA_PER_SPELL
+
+    def __init__(self) -> None:
+        # Start game by farming
+        self._current_strategy = Strategy.FARMING
+        self._farming = Farming()
+
+
+    def _update_strategy(self, my_mana: int):
+        # if we have enough mana, switch to attack
+        if (my_mana > self.MANA_THRESHOLD_FOR_ATTACK and self._current_strategy != Strategy.ATTACKING):
+            print("Switching to Strategy.ATTACKING", file=sys.stderr, flush=True)
+            self._current_strategy = Strategy.ATTACKING
+        # if low mana, go farming
+        elif (my_mana < self.MANA_THRESHOLD_FOR_FARMING and self._current_strategy != Strategy.FARMING):
+            print("Switching to Strategy.FARMING", file=sys.stderr, flush=True)
+            self._current_strategy = Strategy.FARMING
+
+
+    def get_commands(
+        self,
+        heroes: list[Entity],
+        monsters: list[Entity],
+        opp_heroes: list[Entity],
+        my_mana: int
+    ) -> list[str]:
+
+        self._update_strategy(my_mana)
+
+        if self._current_strategy == Strategy.FARMING:
+            # 2 defenders + 1 farmer
+            nb_defenders = 2
+            defenders = heroes[:nb_defenders]
+            defense_commands = Defense.generate_commands(defenders, monsters, my_mana)
+
+            farmer_command = self._farming.get_command(heroes[nb_defenders], monsters)
+            return defense_commands + [farmer_command]
+
+        elif self._current_strategy == Strategy.ATTACKING:
+            # 2 defenders + 1 attacker
+            nb_defenders = 2
+            defenders = heroes[:nb_defenders]
+            defense_commands = Defense.generate_commands(defenders, monsters, my_mana)
+            attack_command = Attacking.get_command(heroes[nb_defenders], monsters, my_mana)
+            return defense_commands + [attack_command]
+
+        else:
+            raise Exception(f'Unhandled strategy: {self._current_strategy}')
+
+
+orchestrator = Orchestrator()
 
 # game loop
 while True:
@@ -500,17 +562,11 @@ while True:
         elif _type == TYPE_OP_HERO:
             opp_heroes.append(entity)
 
-    # 2 defenders + 1 farmer
-    nb_defenders = 2
-    defenders = my_heroes[:nb_defenders]
-    defense_commands = Defense.generate_commands(defenders, monsters, my_mana)
 
-    farmer_command = farming.get_command(my_heroes[nb_defenders], monsters)
+    commands = orchestrator.get_commands(my_heroes, monsters, opp_heroes, my_mana)
 
-    for command in defense_commands:
+    for command in commands:
         print(command)
 
-    print(farmer_command)
 
-    # for i in range(heroes_per_player):
-    #     # To debug: print("Debug messages...", file=sys.stderr, flush=True)
+    # To debug: print("Debug messages...", file=sys.stderr, flush=True)
