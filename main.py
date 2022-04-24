@@ -1,8 +1,9 @@
 from __future__ import annotations
+from email.mime import base
 import sys
 import math
 import random
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 
 # TODO:
@@ -63,6 +64,14 @@ def get_distance(a: Position, b: Position) -> float:
     return math.sqrt((b.x - a.x)**2 + (b.y - a.y)**2)
 
 
+def bound_to_zero_one(x: int) -> float:
+    """
+    increasing function
+    result bounded to ]0-1]
+    """
+    return 1 - 1/(1 + x)
+
+
 def invert_position(position: Position):
     """
     If this method takes my base position as input, it returns the enemy base position.
@@ -96,13 +105,19 @@ def spell_wind_command(comment: str = ''):
     return f'SPELL WIND {enemy_base_position.x} {enemy_base_position.y} {comment}'
 
 
-def spell_control_command(monster: Entity):
-    p = get_random_position_in_enemy_base_radius()
+def spell_control_command(monster: Entity, use_random_position: bool):
+    if use_random_position:
+        p = get_random_position_in_enemy_base_radius()
+    else:
+        p = enemy_base_position
     return f'SPELL CONTROL {monster.id} {p.x} {p.y}'
 
 
-###### DEFENSE ##############
+def spell_shield_command(entity: Entity) -> str:
+    return f'SPELL SHIELD {entity.id}'
 
+
+###### DEFENSE ##############
 
 
 class Defense:
@@ -252,7 +267,7 @@ class Defense:
                     command = spell_wind_command(comment=f'for monster {monster.id}')
                     my_mana -= MANA_PER_SPELL
                 elif Defense.should_use_control_spell(monster, hero, my_mana):
-                    command = spell_control_command(monster)
+                    command = spell_control_command(monster, use_random_position=True)
                     my_mana -= MANA_PER_SPELL
                 else:
                     command = move_to_target_command(monster.position, f"to monster {monster.id}")
@@ -273,6 +288,187 @@ class Defense:
         return Defense.__get_commands(hero_to_monster, heroes, monsters_by_id, my_mana)
 
 
+class Farming:
+
+    # Idea: define a zone where the hero should attack all monsters
+    # - Let's start with a square
+    # - he should attack the monster closest to him inside the square
+    # - if no monster, he should patrol / or come to waiting position for start
+
+    patrol_positions = [
+        Position(int(MAP_SIZE_X/2), int(MAP_SIZE_Y * 0.2)),
+        Position(int(MAP_SIZE_X/2), int(MAP_SIZE_Y * 0.8))
+    ]
+
+    def __init__(self) -> None:
+        self.current_patrol_idx = 0
+
+
+    @staticmethod
+    def is_inside_area(position: Position):
+        # not too close to neither base
+        distance_to_base = get_distance(position, base_position)
+        distance_to_enemy_base = get_distance(position, enemy_base_position)
+
+        return (
+            distance_to_base > 1.5 * BASE_RADIUS
+            and distance_to_enemy_base > 1.5 * BASE_RADIUS)
+
+
+    def next_position_for_patrol(self, hero: Entity) -> Position:
+        current_patrol_position = self.patrol_positions[self.current_patrol_idx]
+
+        d = get_distance(hero.position, current_patrol_position)
+
+        if (d < 100):
+            # we're close to the position, we can now go to the next one
+            self.current_patrol_idx = (self.current_patrol_idx + 1) % len(self.patrol_positions)
+
+        return self.patrol_positions[self.current_patrol_idx]
+
+
+    @staticmethod
+    def get_target(hero: Entity, monsters: list[Entity]) -> Optional[Entity]:
+        """
+        closest monster in area
+        """
+        targets = [m for m in monsters if Farming.is_inside_area(m.position)]
+        if targets:
+            return min(targets, key=lambda x: get_distance(x.position, hero.position))
+
+        return None
+
+
+    def get_command(self, hero: Entity, monsters: list[Entity]) -> str:
+        target = Farming.get_target(hero, monsters)
+        if target:
+            return move_to_target_command(target.position, f'farmer->m{target.id}')
+
+        next_position = self.next_position_for_patrol(hero)
+        return move_to_target_command(next_position, 'farmer->patrol')
+
+
+class Attacking:
+
+    @staticmethod
+    def get_waiting_position():
+        angle = math.pi / 8
+        radius = 1.1 * BASE_RADIUS
+        p = Position(
+            int(radius * math.cos(angle)),
+            int(radius * math.sin(angle)))
+
+        # We want a point close to the enemy base
+        if base_position.x == 0:
+            p = invert_position(p)
+
+        return p
+
+
+    @staticmethod
+    def get_potential_shield_actions(
+        hero: Entity,
+        monsters: list[Entity],
+        my_mana: int,
+        only_in_hero_range: bool
+    ) -> list[tuple[str, Entity, float]]:
+        actions: list[tuple[str, Entity, float]] = []
+
+        for monster in monsters:
+            d_hero_monster = get_distance(hero.position, monster.position)
+            d_monster_enemy_base = get_distance(monster.position, enemy_base_position)
+
+            if (my_mana <= 5 * MANA_PER_SPELL  # We want to keep mana for defense in case it's needed
+                or monster.shield_life > 0  # can't SHIELD a monster with SHIELD
+                or monster.threat_for != THREAT_FOR_OP):  # we only want to SHIELD monsters attacking opponent base
+                continue
+            if (only_in_hero_range and d_hero_monster >= SPELL_SHIELD_RANGE):  # too far away
+                continue
+
+            # TODO: reevaluate this condition + score
+            if d_monster_enemy_base < 1.2 * BASE_RADIUS:
+                score = 1000 + 10 * bound_to_zero_one(monster.health)
+                action = spell_shield_command(monster)
+                actions.append((action, monster, score))
+
+        return actions
+
+
+    @staticmethod
+    def get_potential_control_actions(
+        hero: Entity,
+        monsters: list[Entity],
+        my_mana: int,
+        only_in_hero_range: bool
+    ) -> list[tuple[str, Entity, float]]:
+        actions: list[tuple[str, Entity, float]] = []
+
+        for monster in monsters:
+            d_hero_monster = get_distance(hero.position, monster.position)
+            d_monster_enemy_base = get_distance(monster.position, enemy_base_position)
+
+            if (my_mana <= 5 * MANA_PER_SPELL  # We want to keep mana for defense in case it's needed
+                or monster.shield_life > 0  # We can't CONTROL a monster with SHIELD
+                or monster.threat_for == THREAT_FOR_OP):  # we only want to CONTROL monsters not attacking opponent base
+                continue
+
+            if (only_in_hero_range and d_hero_monster >= SPELL_SHIELD_RANGE):  # too far away
+                continue
+
+            # TODO: reevaluate this condition + score
+            if d_monster_enemy_base < 1.5 * BASE_RADIUS:
+                score = 500 + 10 * bound_to_zero_one(monster.health)
+                action = spell_control_command(monster, use_random_position=False)
+                actions.append((action, monster, score))
+
+        return actions
+
+
+    @staticmethod
+    def get_move_command(hero: Entity, monsters: list[Entity], my_mana: int) -> str:
+        potential_spells = (
+            Attacking.get_potential_control_actions(hero, monsters, my_mana, only_in_hero_range=False)
+            + Attacking.get_potential_shield_actions(hero, monsters, my_mana, only_in_hero_range=False)
+        )
+
+        if potential_spells:
+            best_spell = max(potential_spells, key=lambda x: x[2])  # best score
+            spell_command, entity, score = best_spell
+            return move_to_target_command(entity.position)
+        else:
+            waiting_position = Attacking.get_waiting_position()
+            return move_to_target_command(waiting_position, 'att->waiting')
+
+
+    @staticmethod
+    def get_command(hero: Entity, monsters: list[Entity], my_mana: int) -> str:
+
+        d = get_distance(hero.position, enemy_base_position)
+        if (d > 1.5 * BASE_RADIUS):
+            waiting_position = Attacking.get_waiting_position()
+            return move_to_target_command(waiting_position, 'att->position')
+
+        potential_spells = (
+            Attacking.get_potential_control_actions(hero, monsters, my_mana, only_in_hero_range=True)
+            + Attacking.get_potential_shield_actions(hero, monsters, my_mana, only_in_hero_range=True)
+        )
+
+        if potential_spells:
+            best_spell = max(potential_spells, key=lambda x: x[2])  # best score
+            spell_command, entity, score = best_spell
+            return spell_command
+        else:
+            return Attacking.get_move_command(hero, monsters, my_mana)
+
+        # TODO: make a list of possible action (entity (can be monster or enemy), TYPE(shield, control,...))
+        # For each action, assign a score
+        # Do action with highest score
+
+        # TODO: go over enemies and see:
+        # - if I could CONTROL one
+
+
+farming = Farming()
 
 # game loop
 while True:
@@ -304,14 +500,17 @@ while True:
         elif _type == TYPE_OP_HERO:
             opp_heroes.append(entity)
 
-    nb_defenders = 3
+    # 2 defenders + 1 farmer
+    nb_defenders = 2
     defenders = my_heroes[:nb_defenders]
     defense_commands = Defense.generate_commands(defenders, monsters, my_mana)
 
+    farmer_command = farming.get_command(my_heroes[nb_defenders], monsters)
 
     for command in defense_commands:
         print(command)
 
+    print(farmer_command)
 
     # for i in range(heroes_per_player):
     #     # To debug: print("Debug messages...", file=sys.stderr, flush=True)
