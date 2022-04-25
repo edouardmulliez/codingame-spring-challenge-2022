@@ -345,7 +345,7 @@ class Patroller:
             self._current_patrol_idx += 1
 
             if self._infinite_loop:
-                self._current_patrol_idx % len(self._patrol_positions)
+                self._current_patrol_idx = self._current_patrol_idx % len(self._patrol_positions)
             else:
                 if self._current_patrol_idx >= len(self._patrol_positions):
                     # We reached the end, we keep the same target and set is_finished to True
