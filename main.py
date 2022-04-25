@@ -1,4 +1,5 @@
 from __future__ import annotations
+from ast import Assert
 from enum import Enum
 import sys
 import math
@@ -7,16 +8,17 @@ from typing import NamedTuple, Optional
 
 
 # TODO:
-# - I should not use wind spell if the target is protected by a shield: DONE
-# - make my defense wait close to my base radius: DONE
-# - I can send spiders which are going to enter in my zone towards to enemy base "SPELL CONTROL entityId x y" : DONE
-# - avoid sending my defense too far away: DONE
-# For attack: I can send 1 hero toward enemy base
-# - I could try to attack opponents (go next to their base and send them spiders) "SPELL WIND x y"
 # - I can also send wind and then protect the spider with shield "SPELL SHIELD entityId"
 
-# I want 2 defenders + 1 farmer
+# TODO: TO TRY
+# - when attacking, also send some monsters from defense with CONTROL
+# - at start of attack, make attacker start from my base, go to enemy base, and on the way, CONTROL all monsters near toward enemy
+# - for attacker: try to control some defenders at some point (find the right moment)
+# - also attack with WIND. (Find the right time: if when I do it, there will be no defender once the wind is done)
+#       Just after that, I should protect the spider.
 
+
+# TODO: use may new Patroller class in Farming class
 
 class Position(NamedTuple):
     x: int
@@ -196,19 +198,32 @@ class Defense:
         """
         heroes: only defenders
         """
-        nb_heroes = len(heroes)
-        # Only try to attack at most the first nb_heroes monsters
-        ordered_monsters = ordered_monsters[:nb_heroes]
-
         # For each of these monsters, we want to attack with the closest hero
         hero_to_monster: dict[int, int] = {}
 
         for monster in ordered_monsters:
-            remaining_heroes = [hero for hero in heroes if hero.id not in hero_to_monster]
-            chosen_hero = min(remaining_heroes, key=lambda x: get_distance(x.position, monster.position))
-            hero_to_monster[chosen_hero.id] = monster.id
+            remaining_heroes = [
+                hero for hero in heroes
+                if hero.id not in hero_to_monster and not hero.is_controlled
+            ]
+            if remaining_heroes:
+                chosen_hero = min(remaining_heroes, key=lambda x: get_distance(x.position, monster.position))
+                hero_to_monster[chosen_hero.id] = monster.id
 
         return hero_to_monster
+
+
+    @staticmethod
+    def should_use_shield_spell(hero: Entity, opp_heroes: list[Entity], enemy_tries_control: bool, my_mana: int):
+        if enemy_tries_control and opp_heroes:
+            d_hero_opp = min([get_distance(hero.position, opp_hero.position) for opp_hero in opp_heroes])
+
+            return (
+                hero.shield_life == 0
+                and my_mana >= 3 * MANA_PER_SPELL
+                and d_hero_opp <= SPELL_CONTROL_RANGE) # an opponent hero could take control
+
+        return False
 
 
     @staticmethod
@@ -251,6 +266,8 @@ class Defense:
         hero_to_monster: dict[int, int],
         heroes: list[Entity],
         monsters_by_id: dict[int, Entity],
+        opp_heroes: list[Entity],
+        enemy_tries_control: bool,
         my_mana: int
     ) -> list[str]:
         """
@@ -258,7 +275,9 @@ class Defense:
         """
         commands = []
         for (i, hero) in enumerate(heroes):
-            if hero.id in hero_to_monster:
+            if Defense.should_use_shield_spell(hero, opp_heroes, enemy_tries_control, my_mana):
+                command = spell_shield_command(hero)
+            elif hero.id in hero_to_monster:
                 monster_id = hero_to_monster[hero.id]
                 monster = monsters_by_id[monster_id]
 
@@ -280,12 +299,47 @@ class Defense:
 
 
     @staticmethod
-    def generate_commands(heroes: list[Entity], monsters: list[Entity], my_mana: int) -> list[str]:
+    def generate_commands(
+        heroes: list[Entity],
+        monsters: list[Entity],
+        opp_heroes: list[Entity],
+        enemy_tries_control: bool,
+        my_mana: int
+    ) -> list[str]:
         monsters_to_attack = Defense.find_targets(monsters)
         hero_to_monster = Defense.assign_heroes_to_monsters(heroes, monsters_to_attack)
 
         monsters_by_id = {m.id: m for m in monsters}
-        return Defense.__get_commands(hero_to_monster, heroes, monsters_by_id, my_mana)
+        return Defense.__get_commands(hero_to_monster, heroes, monsters_by_id, opp_heroes, enemy_tries_control, my_mana)
+
+
+class Patroller:
+
+    def __init__(self, patrol_positions: list[Position], infinite_loop: bool) -> None:
+        Assert(len(patrol_positions) > 0)
+        self._patrol_positions = patrol_positions
+        self._infinite_loop = infinite_loop
+        self._current_patrol_idx = 0
+        self.is_finished = False
+
+    def next_position_for_patrol(self, hero: Entity) -> Position:
+        current_patrol_position = self._patrol_positions[self._current_patrol_idx]
+
+        d = get_distance(hero.position, current_patrol_position)
+
+        if (d < 100):
+            # we're close to the position, we can now go to the next one
+            self._current_patrol_idx += 1
+
+            if self._infinite_loop:
+                self._current_patrol_idx % len(self._patrol_positions)
+            else:
+                if self._current_patrol_idx >= len(self._patrol_positions):
+                    # We reached the end, we keep the same target and set is_finished to True
+                    self.is_finished = True
+                    self._current_patrol_idx = len(self._patrol_positions) - 1
+
+        return self._patrol_positions[self._current_patrol_idx]
 
 
 class Farming:
@@ -460,10 +514,6 @@ class Attacking:
         else:
             return Attacking.get_move_command(hero, monsters, my_mana)
 
-        # TODO: make a list of possible action (entity (can be monster or enemy), TYPE(shield, control,...))
-        # For each action, assign a score
-        # Do action with highest score
-
         # TODO: go over enemies and see:
         # - if I could CONTROL one
 
@@ -478,7 +528,7 @@ class Orchestrator:
     Decides which type of strategy (defense/farming/attack) should be applied during the game
     """
     # TODO: adapt this number
-    MANA_THRESHOLD_FOR_ATTACK = 20 * MANA_PER_SPELL
+    MANA_THRESHOLD_FOR_ATTACK = 22 * MANA_PER_SPELL
     # TODO: adapt this number
     MANA_THRESHOLD_FOR_FARMING = 3 * MANA_PER_SPELL
 
@@ -486,6 +536,7 @@ class Orchestrator:
         # Start game by farming
         self._current_strategy = Strategy.FARMING
         self._farming = Farming()
+        self._enemy_tries_control = False
 
 
     def _update_strategy(self, my_mana: int):
@@ -509,11 +560,15 @@ class Orchestrator:
 
         self._update_strategy(my_mana)
 
+        for hero in heroes:
+            if hero.is_controlled:
+                self._enemy_tries_control = True
+
         if self._current_strategy == Strategy.FARMING:
             # 2 defenders + 1 farmer
             nb_defenders = 2
             defenders = heroes[:nb_defenders]
-            defense_commands = Defense.generate_commands(defenders, monsters, my_mana)
+            defense_commands = Defense.generate_commands(defenders, monsters, opp_heroes, self._enemy_tries_control, my_mana)
 
             farmer_command = self._farming.get_command(heroes[nb_defenders], monsters)
             return defense_commands + [farmer_command]
@@ -522,7 +577,7 @@ class Orchestrator:
             # 2 defenders + 1 attacker
             nb_defenders = 2
             defenders = heroes[:nb_defenders]
-            defense_commands = Defense.generate_commands(defenders, monsters, my_mana)
+            defense_commands = Defense.generate_commands(defenders, monsters, opp_heroes, self._enemy_tries_control, my_mana)
             attack_command = Attacking.get_command(heroes[nb_defenders], monsters, my_mana)
             return defense_commands + [attack_command]
 
