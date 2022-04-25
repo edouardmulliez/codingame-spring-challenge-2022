@@ -50,6 +50,8 @@ THREAT_FOR_OP = 2
 SPELL_WIND_RADIUS = 1280
 SPELL_CONTROL_RANGE = 2200
 SPELL_SHIELD_RANGE = 2200
+VISION_RANGE = 2200
+
 MANA_PER_SPELL = 10
 
 MAP_SIZE_X = 17630
@@ -320,14 +322,25 @@ class Patroller:
         self._patrol_positions = patrol_positions
         self._infinite_loop = infinite_loop
         self._current_patrol_idx = 0
-        self.is_finished = False
+        self._is_finished = False
+
+    def is_finished(self, hero: Entity):
+        if self._current_patrol_idx == len(self._patrol_positions) - 1:
+            # last position
+            current_patrol_position = self._patrol_positions[self._current_patrol_idx]
+            d = get_distance(hero.position, current_patrol_position)
+            if d < 800:
+                self._is_finished = True
+
+        return self._is_finished
+
 
     def next_position_for_patrol(self, hero: Entity) -> Position:
         current_patrol_position = self._patrol_positions[self._current_patrol_idx]
 
         d = get_distance(hero.position, current_patrol_position)
 
-        if (d < 100):
+        if (d < 800):
             # we're close to the position, we can now go to the next one
             self._current_patrol_idx += 1
 
@@ -336,26 +349,21 @@ class Patroller:
             else:
                 if self._current_patrol_idx >= len(self._patrol_positions):
                     # We reached the end, we keep the same target and set is_finished to True
-                    self.is_finished = True
+                    self._is_finished = True
                     self._current_patrol_idx = len(self._patrol_positions) - 1
 
         return self._patrol_positions[self._current_patrol_idx]
 
 
 class Farming:
-
-    # Idea: define a zone where the hero should attack all monsters
-    # - Let's start with a square
-    # - he should attack the monster closest to him inside the square
-    # - if no monster, he should patrol / or come to waiting position for start
-
-    patrol_positions = [
-        Position(int(MAP_SIZE_X/2), int(MAP_SIZE_Y * 0.2)),
-        Position(int(MAP_SIZE_X/2), int(MAP_SIZE_Y * 0.8))
-    ]
+    # Move in the middle of the map, and attack all available monsters
 
     def __init__(self) -> None:
-        self.current_patrol_idx = 0
+        patrol_positions = [
+            Position(int(MAP_SIZE_X/2), int(MAP_SIZE_Y * 0.2)),
+            Position(int(MAP_SIZE_X/2), int(MAP_SIZE_Y * 0.8))
+        ]
+        self._patroller = Patroller(patrol_positions, infinite_loop=True)
 
 
     @staticmethod
@@ -367,18 +375,6 @@ class Farming:
         return (
             distance_to_base > 1.5 * BASE_RADIUS
             and distance_to_enemy_base > 1.5 * BASE_RADIUS)
-
-
-    def next_position_for_patrol(self, hero: Entity) -> Position:
-        current_patrol_position = self.patrol_positions[self.current_patrol_idx]
-
-        d = get_distance(hero.position, current_patrol_position)
-
-        if (d < 100):
-            # we're close to the position, we can now go to the next one
-            self.current_patrol_idx = (self.current_patrol_idx + 1) % len(self.patrol_positions)
-
-        return self.patrol_positions[self.current_patrol_idx]
 
 
     @staticmethod
@@ -398,7 +394,7 @@ class Farming:
         if target:
             return move_to_target_command(target.position, f'farmer->m{target.id}')
 
-        next_position = self.next_position_for_patrol(hero)
+        next_position = self._patroller.next_position_for_patrol(hero)
         return move_to_target_command(next_position, 'farmer->patrol')
 
 
@@ -518,32 +514,117 @@ class Attacking:
         # - if I could CONTROL one
 
 
+class BeforeAttacking:
+    """
+    This will be used between the FARMING step and the ATTACKING step.
+    The idea is to go over the map, and send monsters to enemy base with CONTROL
+    """
+
+    STEP_TO_STARTING_POSITION = 'STEP_TO_STARTING_POSITION'
+    STEP_TO_ENEMY_POSITION = 'STEP_TO_ENEMY_POSITION'
+
+    def __init__(self) -> None:
+        starting_position = Position(VISION_RANGE, MAP_SIZE_Y - VISION_RANGE)  # Bottom left
+        ending_position = Position(int(MAP_SIZE_X - 1.3 * BASE_RADIUS), MAP_SIZE_Y - VISION_RANGE) # Bottom right, near base radius
+        # adapt position if our base is not on Top left
+        if base_position.x > 0:
+            starting_position = invert_position(starting_position)
+            ending_position = invert_position(ending_position)
+
+        self._start_patroller = Patroller([starting_position], infinite_loop=False)
+        self._to_enemy_patroller = Patroller([ending_position], infinite_loop=False)
+        self.is_step_finished = False
+        self._current_step = self.STEP_TO_STARTING_POSITION
+
+
+    def _update_step(self, hero):
+        if self._current_step == self.STEP_TO_STARTING_POSITION:
+            if self._start_patroller.is_finished(hero):
+                self._current_step = self.STEP_TO_ENEMY_POSITION
+
+        elif self._current_step == self.STEP_TO_ENEMY_POSITION:
+            if self._to_enemy_patroller.is_finished(hero):
+                self.is_step_finished = True
+
+    @staticmethod
+    def _get_potential_monster_to_control(hero: Entity, monsters: list[Entity], my_mana: int) -> Optional[Entity]:
+        potential_monsters: list[Entity] = []
+        for monster in monsters:
+            d_hero_monster = get_distance(hero.position, monster.position)
+            if (monster.threat_for != THREAT_FOR_OP
+                and monster.shield_life == 0
+                and my_mana > 10 * MANA_PER_SPELL
+                and d_hero_monster < SPELL_CONTROL_RANGE):
+                potential_monsters.append(monster)
+
+        if potential_monsters:
+            # if multiple monsters, take the one with most health
+            return max(potential_monsters, key=lambda x: x.health)
+
+        return None
+
+
+    def get_command(self, hero: Entity, monsters: list[Entity], my_mana: int) -> str:
+        self._update_step(hero)
+
+        if self._current_step == self.STEP_TO_STARTING_POSITION:
+            next_position = self._start_patroller.next_position_for_patrol(hero)
+            return move_to_target_command(next_position, 'ba->to start')
+
+        elif self._current_step == self.STEP_TO_ENEMY_POSITION:
+            monster_to_control = BeforeAttacking._get_potential_monster_to_control(hero, monsters, my_mana)
+            if monster_to_control:
+                return spell_control_command(monster_to_control, use_random_position=False)
+            else:
+                next_position = self._to_enemy_patroller.next_position_for_patrol(hero)
+                return move_to_target_command(next_position, 'ba->to enemy')
+        else:
+            raise Exception(f'Unsupported step: {self._current_step}')
+
+
 class Strategy(Enum):
     FARMING = 1
-    ATTACKING = 2
+    BEFORE_ATTACKING = 2
+    ATTACKING = 3
 
 
 class Orchestrator:
     """
     Decides which type of strategy (defense/farming/attack) should be applied during the game
+
+    FARMING -> BEFORE_ATTACKING -> ATTACKING
     """
     # TODO: adapt this number
     MANA_THRESHOLD_FOR_ATTACK = 22 * MANA_PER_SPELL
     # TODO: adapt this number
     MANA_THRESHOLD_FOR_FARMING = 3 * MANA_PER_SPELL
 
+    # Don't start attacking before that frame.
+    # That way, when we start the attack, there are already some big monsters
+    MIN_GAME_FRAME_FOR_ATTACK = 95
+
     def __init__(self) -> None:
         # Start game by farming
         self._current_strategy = Strategy.FARMING
         self._farming = Farming()
+        self._before_attacking = BeforeAttacking()
         self._enemy_tries_control = False
+        self._game_frame = 0
 
 
     def _update_strategy(self, my_mana: int):
-        # if we have enough mana, switch to attack
-        if (my_mana > self.MANA_THRESHOLD_FOR_ATTACK and self._current_strategy != Strategy.ATTACKING):
-            print("Switching to Strategy.ATTACKING", file=sys.stderr, flush=True)
+        # if we have enough mana, switch to attack preparation
+        if (my_mana > self.MANA_THRESHOLD_FOR_ATTACK
+            and self._current_strategy == Strategy.FARMING
+            and self._game_frame >= self.MIN_GAME_FRAME_FOR_ATTACK
+        ):
+            print("Switching to Strategy.BEFORE_ATTACKING", file=sys.stderr, flush=True)
+            self._current_strategy = Strategy.BEFORE_ATTACKING
+
+        elif (self._current_strategy == Strategy.BEFORE_ATTACKING and self._before_attacking.is_step_finished):
+            # we've finished the BEFORE_ATTACKING step and reached enemy base
             self._current_strategy = Strategy.ATTACKING
+
         # if low mana, go farming
         elif (my_mana < self.MANA_THRESHOLD_FOR_FARMING and self._current_strategy != Strategy.FARMING):
             print("Switching to Strategy.FARMING", file=sys.stderr, flush=True)
@@ -558,6 +639,7 @@ class Orchestrator:
         my_mana: int
     ) -> list[str]:
 
+        self._game_frame += 1
         self._update_strategy(my_mana)
 
         for hero in heroes:
@@ -572,6 +654,15 @@ class Orchestrator:
 
             farmer_command = self._farming.get_command(heroes[nb_defenders], monsters)
             return defense_commands + [farmer_command]
+
+        elif self._current_strategy == Strategy.BEFORE_ATTACKING:
+            # 2 defenders + 1 attacker
+            nb_defenders = 2
+            defenders = heroes[:nb_defenders]
+            defense_commands = Defense.generate_commands(defenders, monsters, opp_heroes, self._enemy_tries_control, my_mana)
+
+            attacker_command = self._before_attacking.get_command(heroes[nb_defenders], monsters, my_mana)
+            return defense_commands + [attacker_command]
 
         elif self._current_strategy == Strategy.ATTACKING:
             # 2 defenders + 1 attacker
