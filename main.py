@@ -11,16 +11,23 @@ from typing import NamedTuple, Optional
 # - I can also send wind and then protect the spider with shield "SPELL SHIELD entityId"
 
 # TODO: TO TRY
-# - when attacking, also send some monsters from defense with CONTROL
-# - at start of attack, make attacker start from my base, go to enemy base, and on the way, CONTROL all monsters near toward enemy
+# - at start of attack, make attacker start from my base, go to enemy base, and on the way, CONTROL all monsters near toward enemy: DONE
+# - when attacking, also send some monsters from defense with CONTROL: MAYBE, but not sure it's the most efficient
 # - for attacker: try to control some defenders at some point (find the right moment)
 # - also attack with WIND. (Find the right time: if when I do it, there will be no defender once the wind is done)
 #       Just after that, I should protect the spider.
 
+# Idea fo better defense
+# - when moving, go on a place to attack multiple spiders at once (instead of moving on spiders, go to place between 2)
+# - if needed, attack the same spider with multiple defenders
+# - if we're sure the spider will reach base and has a shield up to base, then give up on it
 
-# TODO: use may new Patroller class in Farming class
 
 class Position(NamedTuple):
+    x: int
+    y: int
+
+class Vector(NamedTuple):
     x: int
     y: int
 
@@ -50,6 +57,9 @@ THREAT_FOR_OP = 2
 SPELL_WIND_RADIUS = 1280
 SPELL_CONTROL_RANGE = 2200
 SPELL_SHIELD_RANGE = 2200
+
+SPELL_WIND_PUSH_LENGTH = 2200
+
 VISION_RANGE = 2200
 
 MANA_PER_SPELL = 10
@@ -473,6 +483,77 @@ class Attacking:
 
         return actions
 
+    @staticmethod
+    def _get_wind_vector(hero: Entity) -> Vector:
+        """
+        Wind vector: going from hero position, to enemy base, with a norm equal to
+        """
+        vx = enemy_base_position.x - hero.position.x
+        vy = enemy_base_position.y - hero.position.y
+        d = math.hypot(vx, vy)
+
+        # Have a vector with norm SPELL_WIND_PUSH_LENGTH
+        return Vector(
+            int(vx * SPELL_WIND_PUSH_LENGTH / d),
+            int(vy * SPELL_WIND_PUSH_LENGTH / d)
+        )
+
+
+    @staticmethod
+    def get_potential_wind_actions(
+        hero: Entity,
+        monsters: list[Entity],
+        opp_heroes: list[Entity],
+        my_mana: int
+    ) -> list[tuple[str, Entity, float]]:
+        actions: list[tuple[str, Entity, float]] = []
+
+        wind_vector = Attacking._get_wind_vector(hero)
+
+        if opp_heroes:
+            d_hero_opp_hero = min([get_distance(hero.position, opp_hero.position) for opp_hero in opp_heroes])
+        else:
+            # if there is no visible opp_hero, let's suppose there are somewhere outside of our vision
+            d_hero_opp_hero = 3 * VISION_RANGE
+
+        if (d_hero_opp_hero <= SPELL_WIND_RADIUS  # we don't want to push our opp_hero with the monster
+            or my_mana <= 3 * MANA_PER_SPELL):  # We want to keep mana for defense in case it's needed
+            return actions
+
+        for monster in monsters:
+            # Position of the monster if we push it
+            next_monster_position = Position(
+                monster.position.x + wind_vector.x,
+                monster.position.y + wind_vector.y)
+
+            d_hero_monster = get_distance(hero.position, monster.position)
+            d_monster_enemy_base = get_distance(monster.position, enemy_base_position)
+            d_monster_enemy_base_next = get_distance(next_monster_position, enemy_base_position)
+            d_hero_monster_next = get_distance(next_monster_position, hero.position)
+
+            if opp_heroes:
+                d_opp_hero_monster_next = min([
+                    get_distance(next_monster_position, opp_hero.position)
+                    for opp_hero in opp_heroes])
+            else:
+                d_opp_hero_monster_next = 3 * VISION_RANGE
+
+
+            # TODO:
+            # - see if I could send the monsters even if I cannot cast a SHIELD after
+            # - also see if I should change the radius where monsters are sent
+
+            if (d_hero_monster < SPELL_WIND_RADIUS  #  monster close enough to cast a spell
+                and d_monster_enemy_base_next < 0.95 * BASE_RADIUS  # TODO: see if we should adapt this number
+                and d_opp_hero_monster_next > SPELL_WIND_RADIUS  # at next step, opponent cannot CAST wind on monster
+                and d_hero_monster_next <= SPELL_SHIELD_RANGE  # that way, we can cast a shield at next step
+            ):
+                action = spell_wind_command(comment=f'to m{monster.id}')
+                score = 2000
+                actions.append((action, monster, score))
+
+        return actions
+
 
     @staticmethod
     def get_move_command(hero: Entity, monsters: list[Entity], my_mana: int) -> str:
@@ -501,6 +582,7 @@ class Attacking:
         potential_spells = (
             Attacking.get_potential_control_actions(hero, monsters, my_mana, only_in_hero_range=True)
             + Attacking.get_potential_shield_actions(hero, monsters, my_mana, only_in_hero_range=True)
+            + Attacking.get_potential_wind_actions(hero, monsters, opp_heroes, my_mana)
         )
 
         if potential_spells:
