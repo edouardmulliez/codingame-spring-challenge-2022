@@ -582,7 +582,7 @@ class Attacking:
         potential_spells = (
             Attacking.get_potential_control_actions(hero, monsters, my_mana, only_in_hero_range=True)
             + Attacking.get_potential_shield_actions(hero, monsters, my_mana, only_in_hero_range=True)
-            + Attacking.get_potential_wind_actions(hero, monsters, opp_heroes, my_mana)
+            # + Attacking.get_potential_wind_actions(hero, monsters, opp_heroes, my_mana)
         )
 
         if potential_spells:
