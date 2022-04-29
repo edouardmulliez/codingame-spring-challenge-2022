@@ -1,6 +1,7 @@
 from __future__ import annotations
 from ast import Assert
 from enum import Enum
+from itertools import combinations
 import sys
 import math
 import random
@@ -62,6 +63,9 @@ SPELL_WIND_PUSH_LENGTH = 2200
 
 VISION_RANGE = 2200
 
+HERO_MOVE_SIZE = 800
+HERO_ATTACK_RADIUS = 800
+
 MANA_PER_SPELL = 10
 
 MAP_SIZE_X = 17630
@@ -72,6 +76,10 @@ base_x, base_y = [int(i) for i in input().split()]
 heroes_per_player = int(input())
 
 base_position = Position(base_x, base_y)
+
+
+def debug_print(message: str):
+    print(message, file=sys.stderr, flush=True)
 
 
 def get_distance(a: Position, b: Position) -> float:
@@ -129,6 +137,72 @@ def spell_control_command(monster: Entity, use_random_position: bool):
 
 def spell_shield_command(entity: Entity) -> str:
     return f'SPELL SHIELD {entity.id}'
+
+
+def compute_average_position(positions: list[Position]) -> Position:
+    n = len(positions)
+    x = int(sum(p.x for p in positions) / n)
+    y = int(sum(p.y for p in positions) / n)
+    return Position(x, y)
+
+
+def move_to_monster(hero: Entity, target_monster: Entity, monsters: list[Entity]):
+    """
+    Move towards the monster. If there are other monsters close to that one, also try to
+    go to a position where multiple monsters can be attacked at once.
+
+    Returns the targeted position and the list of monsters that will be attacked from that position.
+    """
+    d = get_distance(hero.position, target_monster.position)
+
+    # If monster is to far, just go to monster
+    if (d >= HERO_MOVE_SIZE + HERO_ATTACK_RADIUS):
+        return target_monster.position, [target_monster]
+
+    # Monsters that can be reached by hero, and that are close enough to target_monster
+    potential_monsters: list[Entity] = []
+    for m in monsters:
+        if m.id != target_monster.id:
+            d_m_m = get_distance(m.position, target_monster.position)
+            d_h_m = get_distance(m.position, hero.position)
+            if (d_m_m < 2 * HERO_ATTACK_RADIUS and d_h_m < HERO_MOVE_SIZE + HERO_ATTACK_RADIUS):
+                potential_monsters.append(m)
+
+    # Potential positions: average of the positions of multiple monsters
+    potential_positions = []
+    for k in range(1, len(potential_monsters) + 1):
+        monster_combinations = list(combinations(potential_monsters, k))
+        for monster_combination in monster_combinations:
+            p = compute_average_position([m.position for m in [target_monster] + list(monster_combination)])
+            potential_positions.append(p)
+
+    chosen_position = target_monster.position
+    max_additional_monsters: list[Entity] = []
+
+    # Choose the position where we can attack the maximum number of monsters
+    for p in potential_positions:
+        d_move = get_distance(hero.position, p)
+        d_monster = get_distance(target_monster.position, p)
+
+        if d_move > HERO_MOVE_SIZE or d_monster > HERO_ATTACK_RADIUS:
+            continue
+
+        # Count the number of other monsters that can be reached from that position
+        reached_monsters = [
+            m  for m in potential_monsters
+            if get_distance(m.position, p) < HERO_ATTACK_RADIUS
+        ]
+        if len(reached_monsters) > len(max_additional_monsters):
+            chosen_position = p
+            max_additional_monsters = reached_monsters
+
+    return chosen_position, [target_monster] + max_additional_monsters
+
+
+def move_to_monster_command(hero: Entity, target_monster: Entity, monsters: list[Entity]):
+    chosen_position, targeted_monsters = move_to_monster(hero, target_monster, monsters)
+    comment = 'att:' + ','.join(f'm{monster.id}' for monster in targeted_monsters)
+    return move_to_target_command(chosen_position, comment)
 
 
 ###### DEFENSE ##############
@@ -295,16 +369,15 @@ class Defense:
 
                 # TODO: update when we should use the spell
                 if Defense.should_use_wind_spell(monster, hero, my_mana):
-                    command = spell_wind_command(comment=f'for monster {monster.id}')
+                    command = spell_wind_command(comment=f'm{monster.id}')
                     my_mana -= MANA_PER_SPELL
                 elif Defense.should_use_control_spell(monster, hero, my_mana):
                     command = spell_control_command(monster, use_random_position=True)
                     my_mana -= MANA_PER_SPELL
                 else:
-                    command = move_to_target_command(monster.position, f"to monster {monster.id}")
+                    command = move_to_monster_command(hero, monster, monsters)
             else:
                 command = Defense.move_to_waiting_position(i, len(heroes))
-                # command = "WAIT"
             commands.append(command)
 
         return commands
@@ -400,9 +473,9 @@ class Farming:
 
 
     def get_command(self, hero: Entity, monsters: list[Entity]) -> str:
-        target = Farming.get_target(hero, monsters)
-        if target:
-            return move_to_target_command(target.position, f'farmer->m{target.id}')
+        target_monster = Farming.get_target(hero, monsters)
+        if target_monster:
+            return move_to_monster_command(hero, target_monster, monsters)
 
         next_position = self._patroller.next_position_for_patrol(hero)
         return move_to_target_command(next_position, 'farmer->patrol')
@@ -795,6 +868,3 @@ while True:
 
     for command in commands:
         print(command)
-
-
-    # To debug: print("Debug messages...", file=sys.stderr, flush=True)
